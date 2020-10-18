@@ -1,10 +1,26 @@
 {
-    "AWSTemplateFormatVersion": "2010-09-09", 
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Publish AWS Health CloudWatch Events to Chime. See https://github.com/robertmaldon/aws-health-tools/tree/master/chime-notifier.",
     "Parameters": {
-        "HookURL": {
+        "InvestigationEventsHookURL": {
             "Type": "String", 
-            "Description": "Please enter the web hook url from Chime:", 
+            "Description": "Please enter the web hook url from Chime for investigation events:", 
             "NoEcho": true
+        },
+        "OtherEventsHookURL": {
+            "Type": "String", 
+            "Description": "Please enter the web hook url from Chime for other categories of events:", 
+            "NoEcho": true
+        },
+        "EventURL": {
+            "Type": "String", 
+            "Description": "(Optional) Please enter the url for a dashboard (such as PHD) that can display information for an event:",
+            "Default": "https://phd.aws.amazon.com/phd/home?region={region}#/event-log?eventID={eventArn}&eventTab=details&layout=vertical"
+        },
+        "AccountURL": {
+            "Type": "String", 
+            "Description": "(Optional) Please enter the url for a dashboard that can display information for an account:",
+            "Default": ""
         }
     }, 
     "Resources": {
@@ -68,17 +84,26 @@
                 }, 
                 "Environment": {
                     "Variables": {
-                        "CHIMEWEBHOOK": {
-                            "Ref": "HookURL"
+                        "CHIMEWEBHOOKINVESTIGATIONEVENTS": {
+                            "Ref": "InvestigationEventsHookURL"
+                        },
+                        "CHIMEWEBHOOKOTHEREVENTS": {
+                            "Ref": "OtherEventsHookURL"
+                        },
+                        "EVENTURL": {
+                            "Ref": "EventURL"
+                        },
+                        "ACCOUNTURL": {
+                            "Ref": "AccountURL"
                         }
                     }
                 }, 
                 "Code": {
                     "ZipFile": {
-                        "Fn::Sub": "#Sample Lambda Function to post notifications to a Chime room when an AWS Health event happens\nfrom __future__ import print_function \nimport boto3 \nimport json \nimport logging \nimport os \nfrom urllib2 import Request, urlopen, URLError, HTTPError \n# Setting up logging \nlogger = logging.getLogger() \nlogger.setLevel(logging.INFO) \n# main function \ndef lambda_handler(event, context): \n  message =  str(event['detail']['eventDescription'][0]['latestDescription']  + \" https://phd.aws.amazon.com/phd/home?region=us-east-1#/event-log?eventID=\" + event['detail']['eventArn'])\n  json.dumps(message) \n  chime_message = {'Content': message}\n  logger.info(str(chime_message))\n  webhookurl = str(os.environ['CHIMEWEBHOOK'])\n  req = Request(webhookurl, json.dumps(chime_message)) \n  try: \n    response = urlopen(req) \n    response.read() \n    logger.info(\"Message posted: %s\", chime_message['Content']) \n  except HTTPError as e: \n    logger.error(\"Request failed : %d %s\", e.code, e.reason) \n  except URLError as e: \n    logger.error(\"Server connection failed: %s\", e.reason)       \n"
+                        "Fn::Sub": "# Sample Lambda Function to post notifications to a Chime room when an AWS Health event happens\nfrom __future__ import print_function\nimport json\nimport logging\nimport os\nfrom urllib.request import Request, urlopen\nfrom urllib.error import URLError, HTTPError\n\n# Setting up logging\nlogger = logging.getLogger()\nlogger.setLevel(logging.INFO)\n\n# helper functions\n\n# although markdown has a number of special chars (\\`*_{}[]()#+-.!) the chime\n# android app seems to have a problem with just underscores (the desktop app\n# doesn't), so we put anything contaning underscores into a markdown code block\ndef escape_markdown_special_chars(s):\n    if type(s) is list:\n        l = []\n        for i in s:\n            l.append(escape_markdown_special_chars(i))\n        return l\n    elif s is not None:\n        if s.count('_') > 0:\n            return '`{}`'.format(s)\n        else:\n            return s\n    else:\n        return None\n\ndef val(d, key):\n    if key in d:\n        return d[key]\n    else:\n        return None\n\n# create a url from a cloudformation parameter, if it was specified (not blank)\ndef optional_url(env_var_url, data):\n    if env_var_url in os.environ and os.environ[env_var_url]:\n        raw_url = os.environ[env_var_url]\n        return raw_url.format(**data)\n    else:\n        return None\n\n# main function\ndef lambda_handler(event, context):\n    detail = event['detail']\n    d = {\n        'account': val(event, 'account'),\n        'description': detail['eventDescription'][0]['latestDescription'],\n        'endTime': val(detail, 'endTime'),\n        'eventArn': val(detail, 'eventArn'),\n        'eventTypeCategory': val(detail, 'eventTypeCategory'),\n        'eventTypeCode': val(detail, 'eventTypeCode'),\n        'resources': val(event, 'resources'),\n        'region': val(event, 'region'),\n        'service': val(detail, 'service'),\n        'startTime': val(detail, 'startTime')\n    }\n    # use raw values to construct optional urls \n    event_arn_url = optional_url('EVENTURL', d)\n    account_url = optional_url('ACCOUNTURL', d)\n    # escape raw values before constructing the markdown message\n    #for k in d:\n    #    d[k] = escape_markdown_special_chars(d[k])\n    # add urls\n    if event_arn_url:\n        d['eventArnUrl'] = '[{}]({})'.format(d['eventArn'], event_arn_url)\n    else:\n        d['eventArnUrl'] = '{}'.format(d['eventArn'])\n    if account_url:\n        d['accountUrl'] = '[{}]({})'.format(d['account'], account_url)\n    else:\n        d['accountUrl'] = '{}'.format(d['account'])\n    # construct the message\n    message = '''/md\n{description}\n* ARN: {eventArnUrl}\n* Account: {accountUrl}\n* Region: {region}\n* Service: {service}\n* Event type code: `{eventTypeCode}`\n* Event type category: {eventTypeCategory}\n* Start time: {startTime}\n* End time: {endTime}\n* Resources: {resources}\n    '''.format(**d)\n    chime_message = {'Content': message}\n    logger.info(str(chime_message))\n    if detail['eventTypeCategory'] == 'investigation':\n        webhookurl = str(os.environ['CHIMEWEBHOOKINVESTIGATIONEVENTS'])\n    else:\n        webhookurl = str(os.environ['CHIMEWEBHOOKOTHEREVENTS'])\n    req = Request(webhookurl, data=json.dumps(chime_message).encode('utf-8'), headers={'Content-Type': 'application/json'})\n    try:\n        response = urlopen(req)\n        response.read()\n    except HTTPError as e:\n        logger.error('Request failed : %d %s', e.code, e.reason)\n    except URLError as e:\n        logger.error('Server connection failed: %s', e.reason)"
                     }
                 }, 
-                "Runtime": "python2.7", 
+                "Runtime": "python3.7", 
                 "Timeout": "60"
             }
         }, 
